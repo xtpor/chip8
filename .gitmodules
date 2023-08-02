@@ -1,0 +1,9 @@
+[submodule "references/chip8Archive"]
+	path = references/chip8Archive
+	url = https://github.com/JohnEarnest/chip8Archive
+[submodule "references/chip8-test-suite"]
+	path = references/chip8-test-suite
+	url = https://github.com/Timendus/chip8-test-suite
+[submodule "references/chip8"]
+	path = references/chip8
+	url = https://github.com/dmatlack/chip8
