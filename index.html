@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chip8 Emulator by @xtpor</title>
+  <style>
+html, body {
+  height: 100%;
+  background-color: #1B1B1B;
+  color: white;
+  margin: 0;
+  font-family: monospace;
+}
+
+body {
+  display: grid;
+  place-items: center;
+}
+
+.row {
+  display: flex;
+}
+
+.screen {
+  --scaling: 10;
+  width: calc(64px * var(--scaling));
+  height: calc(32px * var(--scaling));
+  border: 1px solid white;
+  image-rendering: pixelated;
+}
+
+.keyword {
+  display: grid;
+  grid-template-columns: auto auto auto auto;
+}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="row">
+      Chip8 Emulator made by @xtpor
+    </div>
+    <div class="row">
+      <input id="rom" type="file">
+      <button id="load">load</button>
+    </div>
+    <div class="row">
+      <canvas id="screen" class="screen" width="64" height="32"></canvas>
+    </div>
+  </main>
+
+  <script>
+// https://github.com/Timendus/chip8-test-suite
+// https://github.com/loktar00/chip8
+const SPRITE_DATA = [
+  0xF0, 0x90, 0x90, 0x90, 0xF0, /* 0 */
+  0x20, 0x60, 0x20, 0x20, 0x70, /* 1 */
+  0xF0, 0x10, 0xF0, 0x80, 0xF0, /* 2 */
+  0xF0, 0x10, 0xF0, 0x10, 0xF0, /* 3 */
+  0x90, 0x90, 0xF0, 0x10, 0x10, /* 4 */
+  0xF0, 0x80, 0xF0, 0x10, 0xF0, /* 5 */
+  0xF0, 0x80, 0xF0, 0x90, 0xF0, /* 6 */
+  0xF0, 0x10, 0x20, 0x40, 0x40, /* 7 */
+  0xF0, 0x90, 0xF0, 0x90, 0xF0, /* 8 */
+  0xF0, 0x90, 0xF0, 0x10, 0xF0, /* 9 */
+  0xF0, 0x90, 0xF0, 0x90, 0x90, /* A */
+  0xE0, 0x90, 0xE0, 0x90, 0xE0, /* B */
+  0xF0, 0x80, 0x80, 0x80, 0xF0, /* C */
+  0xE0, 0x90, 0x90, 0x90, 0xE0, /* D */
+  0xF0, 0x80, 0xF0, 0x80, 0xF0, /* E */
+  0xF0, 0x80, 0xF0, 0x80, 0x80, /* F */
+]
+const SPRITE_DATA_OFFSET = 0
+
+/*
+Chip8 Keyboard Layout
++-+-+-+-+
+|1|2|3|C|
++-+-+-+-+
+|4|5|6|D|
++-+-+-+-+
+|7|8|9|E|
++-+-+-+-+
+|A|0|B|F|
++-+-+-+-+
+*/
+const KEYMAP = {
+  "KeyX": 0x0,
+  "Digit1": 0x1,
+  "Digit2": 0x2,
+  "Digit3": 0x3,
+  "KeyQ": 0x4,
+  "KeyW": 0x5,
+  "KeyE": 0x6,
+  "KeyA": 0x7,
+  "KeyS": 0x8,
+  "KeyD": 0x9,
+  "KeyZ": 0xA,
+  "KeyC": 0xB,
+  "Digit4": 0xC,
+  "KeyR": 0xD,
+  "KeyF": 0xE,
+  "KeyV": 0xF,
+}
+
+const loadButton = document.querySelector("#load")
+const romInput = document.querySelector("#rom")
+const screenCanvas = document.querySelector("#screen")
+const ctx = screenCanvas.getContext("2d")
+
+let romFile
+
+// chip8 vm
+const vm = {
+  clock: 500,
+  running: false,
+  memory: new Uint8Array(4096),
+  stack: new Uint16Array(32),
+  pc: 0,
+  sp: 0,
+  v: new Uint8Array(16),
+  i: 0,
+  dt: 0,
+  st: 0,
+  framebuffer: new Uint8Array(64 * 32),
+  keydown: new Uint8Array(16),
+  keypress: new Uint8Array(16),
+}
+
+loadButton.onclick = () => {
+  const romFile = romInput.files[0]
+  const reader = new FileReader()
+  reader.readAsArrayBuffer(romFile)
+  reader.onload = () => {
+    const rom = new Uint8Array(reader.result)
+    reset(vm)
+    loadRom(vm, rom)
+    vm.pc = 0x200
+    vm.running = true
+  }
+}
+
+window.onkeydown = (e) => {
+  if (typeof KEYMAP[e.code] === "number") {
+    vm.keydown[KEYMAP[e.code]] = 1
+  }
+}
+
+window.onkeyup = (e) => {
+  if (typeof KEYMAP[e.code] === "number") {
+    vm.keydown[KEYMAP[e.code]] = 0
+    vm.keypress[KEYMAP[e.code]] = 1
+  }
+}
+
+function formatHex(n, bytes = 2) {
+  return "0x" + n.toString(16).padStart(bytes * 2, "0")
+}
+
+function reset(vm) {
+  // zero the vm state
+  vm.running = false
+  vm.memory.fill(0, 0, vm.memory.length)
+  vm.stack.fill(0, 0, vm.stack.length)
+  vm.pc = 0
+  vm.sp = 0
+  vm.v.fill(0, 0, vm.v.length)
+  vm.i = 0
+  vm.dt = 0
+  vm.st = 0
+  vm.framebuffer.fill(0, 0, vm.framebuffer.length)
+  vm.keydown.fill(0, 0, vm.keydown.length)
+  vm.keypress.fill(0, 0, vm.keypress.length)
+
+  // load the sprites
+  for (let i = 0; i < SPRITE_DATA.length; i += 1) {
+    vm.memory[SPRITE_DATA_OFFSET + i] = SPRITE_DATA[i]
+  }
+}
+
+function loadRom(vm, rom) {
+  const OFFSET = 0x200
+  for (let i = 0; i < rom.length; i += 1) {
+    vm.memory[OFFSET + i] = rom[i]
+  }
+}
+
+function cycle() {
+  if (!vm.running) return
+
+  // fetch
+  const inst = (vm.memory[vm.pc] << 8) + vm.memory[vm.pc + 1]
+
+  // decode & execute
+  if (inst === 0x00E0) {
+    vm.framebuffer.fill(0, 0, vm.framebuffer.length)
+    vm.pc += 2
+
+  } else if (inst === 0x00EE) { // 0x00EE
+    vm.sp -= 1
+    vm.pc = vm.stack[vm.sp]
+
+  } else if ((inst & 0xF000) === 0x1000) { // 0x1NNN
+    const nnn = inst & 0x0FFF
+    vm.pc = nnn
+
+  } else if ((inst & 0xF000) === 0x2000) { // 0x2NNN
+    const nnn = inst & 0x0FFF
+    vm.stack[vm.sp] = vm.pc + 2
+    vm.sp += 1
+    vm.pc = nnn
+
+  } else if ((inst & 0xF000) === 0x3000) { // 0x3XNN
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const nn = inst & 0x00FF
+    if (vm.v[x] === nn) {
+      vm.pc += 4
+    } else {
+      vm.pc += 2
+    }
+
+  } else if ((inst & 0xF000) === 0x4000) { // 0x4XNN
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const nn = inst & 0x00FF
+    if (vm.v[x] !== nn) {
+      vm.pc += 4
+    } else {
+      vm.pc += 2
+    }
+
+  } else if ((inst & 0xF000) === 0x5000) { // 0x5XY0
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    if (vm.v[x] === vm.v[y]) {
+      vm.pc += 4
+    } else {
+      vm.pc += 2
+    }
+
+  } else if ((inst & 0xF000) === 0x6000) { // 0x6XNN
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const nn = inst & 0x00FF
+    vm.v[x] = nn
+    vm.pc += 2
+
+  } else if ((inst & 0xF000) === 0x7000) { // 7XNN
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const nn = inst & 0x00FF
+    vm.v[x] += nn
+    vm.pc += 2
+
+  } else if ((inst & 0xF00F) === 0x8000) { // 8XY0
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    vm.v[x] = vm.v[y]
+    vm.pc += 2
+
+  } else if ((inst & 0xF00F) === 0x8001) { // 8XY1
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    vm.v[x] |= vm.v[y]
+    vm.v[0xf] = 0
+    vm.pc += 2
+
+  } else if ((inst & 0xF00F) === 0x8002) { // 8XY2
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    vm.v[x] &= vm.v[y]
+    vm.v[0xf] = 0
+    vm.pc += 2
+
+  } else if ((inst & 0xF00F) === 0x8003) { // 8XY3
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    vm.v[x] ^= vm.v[y]
+    vm.v[0xf] = 0
+    vm.pc += 2
+
+  } else if ((inst & 0xF00F) === 0x8004) { // 8XY4
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    const carry = Number(vm.v[x] + vm.v[y] >= 256)
+    vm.v[x] += vm.v[y]
+    vm.v[0xf] = carry
+    vm.pc += 2
+
+  } else if ((inst & 0xF00F) === 0x8005) { // 8XY5
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    const borrow = Number(vm.v[x] - vm.v[y] < 0)
+    vm.v[x] -= vm.v[y]
+    vm.v[0xf] = 1 - borrow
+    vm.pc += 2
+
+  } else if ((inst & 0xF00F) === 0x8006) { // 8XY6
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    const lsbChanged = (vm.v[y] ^ (vm.v[y] >> 1)) & 1
+    vm.v[x] = vm.v[y] >> 1
+    vm.v[0xf] = lsbChanged
+    vm.pc += 2
+
+  } else if ((inst & 0xF00F) === 0x8007) { // 8XY7
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    const borrow = Number(vm.v[y] - vm.v[x] < 0)
+    vm.v[x] = vm.v[y] - vm.v[x]
+    vm.v[0xf] = 1 - borrow
+    vm.pc += 2
+
+  } else if ((inst & 0xF00F) === 0x800E) { // 8XYE
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    const msbChanged = ((vm.v[y] ^ (vm.v[y] << 1)) >> 7) & 1
+    vm.v[x] = vm.v[y] << 1
+    vm.v[0xf] = msbChanged
+    vm.pc += 2
+
+  } else if ((inst & 0xF000) === 0x9000) { // 0x9XY0
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    if (vm.v[x] !== vm.v[y]) {
+      vm.pc += 4
+    } else {
+      vm.pc += 2
+    }
+
+  } else if ((inst & 0xF000) === 0xA000) { // 0xANNN
+    const nnn = inst & 0x0FFF
+    vm.i = nnn
+    vm.pc += 2
+
+  } else if ((inst & 0xF000) === 0xB000) { // 0xBNNN
+    const nnn = inst & 0x0FFF
+    vm.pc = nnn + vm.v[0x0]
+  
+  } else if ((inst & 0xF000) === 0xC000) { // 0xCXNN
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const nn = inst & 0x00FF
+    vm.v[x] = (Math.random() * 256) & nn
+    vm.pc += 2
+
+  } else if ((inst & 0xF000) === 0xD000) { // 0xDXYN
+    const x = (inst & 0x0F00) >> (4 * 2)
+    const y = (inst & 0x00F0) >> (4 * 1)
+    const n = inst & 0x000F
+
+    const bx = vm.v[x] % 64
+    const by = vm.v[y] % 32
+
+    vm.v[0xf] = 0
+    for (let j = 0; j < n; j += 1) {
+      const sprite = vm.memory[vm.i + j]
+      for (let i = 0; i < 8; i += 1) {
+        const sx = bx + i
+        const sy = by + j
+        const bit = (sprite >> (7 - i)) & 1
+
+        if (sx < 64 && sy < 32) {
+          const fbi = sy * 64 + sx
+          vm.v[0xf] |= bit & vm.framebuffer[fbi]
+          vm.framebuffer[fbi] ^= bit
+        }
+      }
+    }
+
+    vm.pc += 2
+  
+  } else if ((inst & 0xF0FF) === 0xE09E) { // 0xEX9E
+    const x = (inst & 0x0F00) >> (4 * 2)
+    if (vm.keydown[vm.v[x]]) {
+      vm.pc += 4
+    } else {
+      vm.pc += 2
+    }
+  
+  } else if ((inst & 0xF0FF) === 0xE0A1) { // 0xEXA1
+    const x = (inst & 0x0F00) >> (4 * 2)
+    if (!vm.keydown[vm.v[x]]) {
+      vm.pc += 4
+    } else {
+      vm.pc += 2
+    }
+
+  } else if ((inst & 0xF0FF) === 0xF007) { // 0xFX07
+    const x = (inst & 0x0F00) >> (4 * 2)
+    vm.v[x] = vm.dt
+    vm.pc += 2
+
+  } else if ((inst & 0xF0FF) === 0xF00A) { // 0xFX0A
+    const x = (inst & 0x0F00) >> (4 * 2)
+    let key = consumeKeypress(vm)
+    if (key !== -1) {
+      vm.v[x] = key
+      vm.pc += 2
+    }
+  
+  } else if ((inst & 0xF0FF) === 0xF015) { // 0xFX15
+    const x = (inst & 0x0F00) >> (4 * 2)
+    vm.dt = vm.v[x]
+    vm.pc += 2
+
+  } else if ((inst & 0xF0FF) === 0xF018) { // 0xFX18
+    const x = (inst & 0x0F00) >> (4 * 2)
+    vm.st = vm.v[x]
+    vm.pc += 2
+
+  } else if ((inst & 0xF0FF) === 0xF01E) { // 0xFX1E
+    const x = (inst & 0x0F00) >> (4 * 2)
+    vm.i += vm.v[x]
+    vm.pc += 2
+  
+  } else if ((inst & 0xF0FF) === 0xF029) { // 0xFX29
+    const x = (inst & 0x0F00) >> (4 * 2)
+    vm.i = vm.v[x] * 5 // sprites are store on 0x0000 to 0x004F
+    vm.pc += 2
+
+  } else if ((inst & 0xF0FF) === 0xF033) { // 0xFX33
+    const x = (inst & 0x0F00) >> (4 * 2)
+    vm.memory[vm.i + 0] = vm.v[x] / 100 | 0
+    vm.memory[vm.i + 1] = vm.v[x] % 100 / 10 | 0
+    vm.memory[vm.i + 2] = vm.v[x] % 10
+    vm.pc += 2
+
+  } else if ((inst & 0xF0FF) === 0xF055) { // 0xFX55
+    const x = (inst & 0x0F00) >> (4 * 2)
+    for (let idx = 0; idx <= x; idx += 1) {
+      vm.memory[vm.i + idx] = vm.v[idx]
+    }
+    vm.i = vm.i + x + 1
+    vm.pc += 2
+
+  } else if ((inst & 0xF0FF) === 0xF065) { // 0xFX65
+    const x = (inst & 0x0F00) >> (4 * 2)
+    for (let idx = 0; idx <= x; idx += 1) {
+      vm.v[idx] = vm.memory[vm.i + idx]
+    }
+    vm.i = vm.i + x + 1
+    vm.pc += 2
+
+  } else {
+    console.error(`fault: unknown instruction ${formatHex(inst)} at ${formatHex(vm.pc)}`)
+    vm.running = false
+  }
+}
+
+function tick(vm) {
+  if (!vm.running) {
+    return
+  }
+
+  // decrement the delay timer
+  if (vm.dt > 0) {
+    vm.dt -= 1
+  }
+
+  // decrement the sound timer
+  vm.st -= 1
+}
+
+function consumeKeypress(vm) {
+  if (!vm.running) {
+    return -1
+  }
+
+  let key = -1
+  for (let i = 0; i < 16; i += 1) {
+    if (vm.keypress[i]) {
+      key = i
+    }
+    vm.keypress[i] = 0
+  }
+  return key
+}
+
+function blit(ctx, framebuffer) {
+  for (let y = 0; y < 32; y += 1) {
+    for (let x = 0; x < 64; x += 1) {
+      ctx.fillStyle = framebuffer[y * 64 + x] ? "white" : "#1B1B1B"
+      ctx.fillRect(x, y, 1, 1)
+    }
+  }
+}
+
+let last = performance.now()
+let timerTime = 0
+function mainloop() {
+  requestAnimationFrame(mainloop)
+
+  const now = performance.now()
+  const deltaTime = (now - last) / 1000
+  last = now
+
+  try {
+    const count = deltaTime * vm.clock
+    for (let i = 0; i < count; i += 1) {
+      cycle()
+    }
+
+    timerTime += deltaTime
+    while (timerTime > (1 / 60)) {
+      tick(vm)
+      timerTime -= (1 / 60)
+    }
+
+    consumeKeypress(vm)
+  } catch (e) {
+    vm.running = false
+    throw e
+  }
+
+  blit(ctx, vm.framebuffer)
+}
+
+requestAnimationFrame(mainloop)
+  </script>
+</body>
+</html>
