@@ -3,6 +3,8 @@
 
 A chip8 emulator written in HTML/CSS/JS
 
+https://xtpor.github.io/chip8
+
 # References
 
 ## Spec
